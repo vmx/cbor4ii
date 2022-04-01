@@ -1,7 +1,9 @@
 use core::fmt;
-use serde::Serialize;
-use crate::core::types;
-use crate::core::enc::{ self, Encode };
+use serde::{ser, Serialize};
+use crate::core::{types};
+use crate::core::enc::{ self, Encode};
+use crate::serde::CBOR_TAGS_CID;
+use cid::serde::CID_SERDE_PRIVATE_IDENTIFIER;
 
 
 pub struct Serializer<W> {
@@ -86,7 +88,8 @@ impl<'a, W: enc::Write> serde::Serializer for &'a mut Serializer<W> {
 
     #[inline]
     fn serialize_f32(self, v: f32) -> Result<Self::Ok, Self::Error> {
-        v.encode(&mut self.writer)?;
+        // In DAG-CBOR floats are always encoded as f64.
+        f64::from(v).encode(&mut self.writer)?;
         Ok(())
     }
 
@@ -153,10 +156,14 @@ impl<'a, W: enc::Write> serde::Serializer for &'a mut Serializer<W> {
     #[inline]
     fn serialize_newtype_struct<T: Serialize + ?Sized>(
         self,
-        _name: &'static str,
+        name: &'static str,
         value: &T
     ) -> Result<Self::Ok, Self::Error> {
-        value.serialize(self)
+        if name == CID_SERDE_PRIVATE_IDENTIFIER {
+            value.serialize(&mut CidSerializer(self))
+        } else {
+            value.serialize(self)
+        }
     }
 
     #[inline]
@@ -282,6 +289,46 @@ impl<'a, W: enc::Write> serde::Serializer for &'a mut Serializer<W> {
         }
 
         writer.flush()
+    }
+
+    fn collect_map<K, V, I>(self, iter: I) -> Result<(), Self::Error>
+    where
+        K: ser::Serialize,
+        V: ser::Serialize,
+        I: IntoIterator<Item = (K, V)>,
+    {
+        use serde::ser::SerializeMap;
+        #[cfg(not(feature = "use_std"))]
+        use crate::alloc::vec::Vec;
+        use crate::core::utils::BufWriter;
+
+        // CBOR RFC-7049 specifies a canonical sort order, where keys are sorted by length first.
+        // This was later revised with RFC-8949, but we need to stick to the original order to stay
+        // compatible with existing data.
+        // We first serialize each map entry into a buffer and then sort those buffers. Byte-wise
+        // comparison gives us the right order as keys in DAG-CBOR are always strings and prefixed
+        // with the length. Once sorted they are written to the actual output.
+        let mut buffer = BufWriter::new(Vec::new());
+        let mut mem_serializer = Serializer::new(&mut buffer);
+        let mut serializer = Collect {
+            bounded: true,
+            ser: &mut mem_serializer,
+        };
+        let mut entries = Vec::new();
+        for (key, value) in iter {
+            serializer.serialize_entry(&key, &value)
+               .map_err(|_| enc::Error::Msg("Map entry cannot be serialized.".into()))?;
+            entries.push(serializer.ser.writer.buffer().to_vec());
+            serializer.ser.writer.clear();
+        }
+
+        enc::MapStartBounded(entries.len()).encode(&mut self.writer)?;
+        entries.sort_unstable();
+        for entry in entries {
+            self.writer.push(&entry)?;
+        }
+
+        Ok(())
     }
 
     #[inline]
@@ -509,5 +556,154 @@ impl<W: enc::Write> FmtWriter<'_, W> {
             State::Segment => enc::End.encode(self.inner),
             State::Error(err) => Err(err)
         }
+    }
+}
+
+/// Serializing a CID correctly as DAG-CBOR.
+struct CidSerializer<'a, W>(&'a mut Serializer<W>);
+
+impl<'a, W: enc::Write> ser::Serializer for &'a mut CidSerializer<'a, W>
+where
+    W::Error: core::fmt::Debug,
+{
+    type Ok = ();
+    type Error = enc::Error<W::Error>;
+
+    type SerializeSeq = ser::Impossible<Self::Ok, Self::Error>;
+    type SerializeTuple = ser::Impossible<Self::Ok, Self::Error>;
+    type SerializeTupleStruct = ser::Impossible<Self::Ok, Self::Error>;
+    type SerializeTupleVariant = ser::Impossible<Self::Ok, Self::Error>;
+    type SerializeMap = ser::Impossible<Self::Ok, Self::Error>;
+    type SerializeStruct = ser::Impossible<Self::Ok, Self::Error>;
+    type SerializeStructVariant = ser::Impossible<Self::Ok, Self::Error>;
+
+    fn serialize_bool(self, _value: bool) -> Result<Self::Ok, Self::Error> {
+        Err(ser::Error::custom("unreachable"))
+    }
+    fn serialize_i8(self, _value: i8) -> Result<Self::Ok, Self::Error> {
+        Err(ser::Error::custom("unreachable"))
+    }
+    fn serialize_i16(self, _value: i16) -> Result<Self::Ok, Self::Error> {
+        Err(ser::Error::custom("unreachable"))
+    }
+    fn serialize_i32(self, _value: i32) -> Result<Self::Ok, Self::Error> {
+        Err(ser::Error::custom("unreachable"))
+    }
+    fn serialize_i64(self, _value: i64) -> Result<Self::Ok, Self::Error> {
+        Err(ser::Error::custom("unreachable"))
+    }
+    fn serialize_u8(self, _value: u8) -> Result<Self::Ok, Self::Error> {
+        Err(ser::Error::custom("unreachable"))
+    }
+    fn serialize_u16(self, _value: u16) -> Result<Self::Ok, Self::Error> {
+        Err(ser::Error::custom("unreachable"))
+    }
+    fn serialize_u32(self, _value: u32) -> Result<Self::Ok, Self::Error> {
+        Err(ser::Error::custom("unreachable"))
+    }
+    fn serialize_u64(self, _value: u64) -> Result<Self::Ok, Self::Error> {
+        Err(ser::Error::custom("unreachable"))
+    }
+    fn serialize_f32(self, _value: f32) -> Result<Self::Ok, Self::Error> {
+        Err(ser::Error::custom("unreachable"))
+    }
+    fn serialize_f64(self, _value: f64) -> Result<Self::Ok, Self::Error> {
+        Err(ser::Error::custom("unreachable"))
+    }
+    fn serialize_char(self, _value: char) -> Result<Self::Ok, Self::Error> {
+        Err(ser::Error::custom("unreachable"))
+    }
+    fn serialize_str(self, _value: &str) -> Result<Self::Ok, Self::Error> {
+        Err(ser::Error::custom("unreachable"))
+    }
+
+    fn serialize_bytes(self, value: &[u8]) -> Result<Self::Ok, Self::Error> {
+        // The bytes of the CID is prefixed with a null byte when encoded as CBOR.
+        let prefixed = [&[0x00], value].concat();
+        // CIDs are serialized with CBOR tag 42.
+        types::Tag(CBOR_TAGS_CID.into(), types::Bytes(&prefixed[..])).encode(&mut self.0.writer)?;
+        Ok(())
+    }
+
+    fn serialize_none(self) -> Result<Self::Ok, Self::Error> {
+        Err(ser::Error::custom("unreachable"))
+    }
+    fn serialize_some<T: ?Sized + ser::Serialize>(
+        self,
+        _value: &T,
+    ) -> Result<Self::Ok, Self::Error> {
+        Err(ser::Error::custom("unreachable"))
+    }
+    fn serialize_unit(self) -> Result<Self::Ok, Self::Error> {
+        Err(ser::Error::custom("unreachable"))
+    }
+    fn serialize_unit_struct(self, _name: &str) -> Result<Self::Ok, Self::Error> {
+        Err(ser::Error::custom("unreachable"))
+    }
+    fn serialize_unit_variant(
+        self,
+        _name: &str,
+        _variant_index: u32,
+        _variant: &str,
+    ) -> Result<Self::Ok, Self::Error> {
+        Err(ser::Error::custom("unreachable"))
+    }
+
+    fn serialize_newtype_struct<T: ?Sized + ser::Serialize>(
+        self,
+        _name: &str,
+        _value: &T,
+    ) -> Result<Self::Ok, Self::Error> {
+        Err(ser::Error::custom("unreachable"))
+    }
+    fn serialize_newtype_variant<T: ?Sized + ser::Serialize>(
+        self,
+        _name: &str,
+        _variant_index: u32,
+        _variant: &str,
+        _value: &T,
+    ) -> Result<Self::Ok, Self::Error> {
+        Err(ser::Error::custom("unreachable"))
+    }
+    fn serialize_seq(self, _len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
+        Err(ser::Error::custom("unreachable"))
+    }
+    fn serialize_tuple(self, _len: usize) -> Result<Self::SerializeTuple, Self::Error> {
+        Err(ser::Error::custom("unreachable"))
+    }
+    fn serialize_tuple_struct(
+        self,
+        _name: &str,
+        _len: usize,
+    ) -> Result<Self::SerializeTupleStruct, Self::Error> {
+        Err(ser::Error::custom("unreachable"))
+    }
+    fn serialize_tuple_variant(
+        self,
+        _name: &str,
+        _variant_index: u32,
+        _variant: &str,
+        _len: usize,
+    ) -> Result<Self::SerializeTupleVariant, Self::Error> {
+        Err(ser::Error::custom("unreachable"))
+    }
+    fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
+        Err(ser::Error::custom("unreachable"))
+    }
+    fn serialize_struct(
+        self,
+        _name: &str,
+        _len: usize,
+    ) -> Result<Self::SerializeStruct, Self::Error> {
+        Err(ser::Error::custom("unreachable"))
+    }
+    fn serialize_struct_variant(
+        self,
+        _name: &str,
+        _variant_index: u32,
+        _variant: &str,
+        _len: usize,
+    ) -> Result<Self::SerializeStructVariant, Self::Error> {
+        Err(ser::Error::custom("unreachable"))
     }
 }

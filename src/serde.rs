@@ -46,7 +46,7 @@ mod buf_writer {
     /// Serializes a value to a writer.
     pub fn to_vec<T>(buf: Vec<u8>, value: &T)
         -> Result<Vec<u8>, enc::Error<TryReserveError>>
-    where T: Serialize
+    where T: Serialize + ?Sized
     {
         let writer = BufWriter::new(buf);
         let mut writer = ser::Serializer::new(writer);
@@ -134,3 +134,6 @@ pub use ser::Serializer;
 
 #[cfg(feature = "use_alloc")]
 pub use de::Deserializer;
+
+/// The CBOR tag that is used for CIDs.
+const CBOR_TAGS_CID: u8 = 42;

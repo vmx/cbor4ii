@@ -3,6 +3,8 @@ use serde::de::{ self, Visitor };
 use crate::core::{ major, marker, types };
 use crate::core::dec::{ self, Decode };
 use crate::util::ScopeGuard;
+use crate::serde::CBOR_TAGS_CID;
+use cid::serde::CID_SERDE_PRIVATE_IDENTIFIER;
 
 
 pub struct Deserializer<R> {
@@ -26,6 +28,20 @@ impl<'de, R: dec::Read<'de>> Deserializer<R> {
             Ok(ScopeGuard(self, |de| de.reader.step_out()))
         } else {
             Err(dec::Error::DepthLimit)
+        }
+    }
+
+    #[inline]
+    fn deserialize_cid<V>(&mut self, visitor: V) -> Result<V::Value, dec::Error<R::Error>>
+    where
+        V: Visitor<'de>
+    {
+        let tag_value = dec::pull_one(&mut self.reader)?;
+        match tag_value {
+            CBOR_TAGS_CID => {
+                visitor.visit_newtype_struct(&mut CidDeserializer(self))
+            }
+            _ => Err(dec::Error::TypeMismatch { name: "CBOR tag", byte: tag_value })
         }
     }
 }
@@ -70,6 +86,10 @@ impl<'de, 'a, R: dec::Read<'de>> serde::Deserializer<'de> for &'a mut Deserializ
             major::TAG => match byte {
                 0xc2 => de.deserialize_u128(visitor),
                 0xc3 => de.deserialize_i128(visitor),
+                0xd8 => {
+                    de.reader.advance(1);
+                    de.deserialize_cid(visitor)
+                }
                 _ => Err(dec::Error::Unsupported { byte })
             },
             major::SIMPLE => match byte {
@@ -201,11 +221,22 @@ impl<'de, 'a, R: dec::Read<'de>> serde::Deserializer<'de> for &'a mut Deserializ
     }
 
     #[inline]
-    fn deserialize_newtype_struct<V>(self, _name: &'static str, visitor: V)
+    fn deserialize_newtype_struct<V>(self, name: &'static str, visitor: V)
         -> Result<V::Value, Self::Error>
     where V: Visitor<'de>
     {
-        visitor.visit_newtype_struct(self)
+        if name == CID_SERDE_PRIVATE_IDENTIFIER {
+            let byte = dec::pull_one(&mut self.reader)?;
+            match byte {
+                // CBOR major tag, that should follow CID tag 42.
+                0xd8 => {
+                    self.deserialize_cid(visitor)
+                }
+                _ => Err(dec::Error::TypeMismatch { name: "Tag", byte })
+            }
+        } else {
+            visitor.visit_newtype_struct(self)
+        }
     }
 
     #[inline]
@@ -496,5 +527,76 @@ where
         use serde::Deserializer;
 
         self.de.deserialize_map(visitor)
+    }
+}
+
+/// Deserialize a DAG-CBOR encoded CID.
+///
+/// This is without the CBOR tag information. It is only the CBOR byte string identifier (major
+/// type 2), the number of bytes, and a null byte prefixed CID.
+///
+/// The reason for not including the CBOR tag information is the [`Value`] implementation. That one
+/// starts to parse the bytes, before we could interfere. If the data only includes a CID, we are
+/// parsing over the tag to determine whether it is a CID or not and go from there.
+//struct CidDeserializer<'a, 'b, R: dec::Read<'b>>(&'a mut Deserializer<'b, R>);
+struct CidDeserializer<'a, R>(&'a mut Deserializer<R>);
+
+impl<'de, 'a, R: dec::Read<'de>> de::Deserializer<'de> for &'a mut CidDeserializer<'a, R>
+{
+    type Error = dec::Error<R::Error>;
+
+    fn deserialize_any<V: de::Visitor<'de>>(self, _visitor: V) -> Result<V::Value, Self::Error> {
+        Err(de::Error::custom(
+            "Only bytes can be deserialized into a CID",
+        ))
+    }
+
+    #[inline]
+    fn deserialize_bytes<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        let byte = dec::peek_one(&mut self.0.reader)?;
+        match dec::if_major(byte) {
+            major::BYTES => {
+                // CBOR encoded CIDs have a zero byte prefix we have to remove.
+                match <types::Bytes<Cow<[u8]>>>::decode(&mut self.0.reader)?.0 {
+                    Cow::Borrowed(buf) => {
+                        if buf.len() <= 1 {
+                            Err(dec::Error::Msg("Invalid CID".into()))
+                        } else {
+                            visitor.visit_borrowed_bytes(&buf[1..])
+                        }
+                    },
+                    Cow::Owned(mut buf) => {
+                        if buf.len() <= 1 {
+                            Err(dec::Error::Msg("Invalid CID".into()))
+                        } else {
+                            buf.remove(0);
+                            visitor.visit_byte_buf(buf)
+                        }
+                    }
+                }
+            }
+            _ => Err(dec::Error::Unsupported { byte })
+        }
+    }
+
+    fn deserialize_newtype_struct<V: de::Visitor<'de>>(
+        self,
+        name: &str,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        if name == CID_SERDE_PRIVATE_IDENTIFIER {
+            self.deserialize_bytes(visitor)
+        } else {
+            return Err(de::Error::custom([
+                "This deserializer must not be called on newtype structs other than one named `",
+                CID_SERDE_PRIVATE_IDENTIFIER,
+                "`"
+            ].concat()));
+        }
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool byte_buf char enum f32 f64 i8 i16 i32 i64 identifier ignored_any map option seq str
+        string struct tuple tuple_struct u8 u16 u32 u64 unit unit_struct
     }
 }

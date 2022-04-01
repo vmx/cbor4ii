@@ -19,6 +19,7 @@ serde1 = [ "serde", "use_alloc" ]
 serde1-value = [ "serde1" ]
 
 [dependencies]
+cid = { version = "0.8.3", features = ["serde-codec"] }
 half = { version = "1", default-features = false, optional = true }
 serde = { version = "1", default-features = false, optional = true }
 
@@ -30,6 +31,8 @@ data-encoding = "2"
 serde_cbor = "0.11"
 ciborium = "0.2"
 criterion = "0.3"
+libipld-core = { version = "0.13.1", features = ["serde-codec"] }
+serde_derive = { version = "1.0.14", default-features = false }
 
 [package.metadata.docs.rs]
 all-features = true
