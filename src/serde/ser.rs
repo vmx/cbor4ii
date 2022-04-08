@@ -132,7 +132,8 @@ impl<'a, W: enc::Write> serde::Serializer for &'a mut Serializer<W> {
 
     #[inline]
     fn serialize_unit(self) -> Result<Self::Ok, Self::Error> {
-        enc::ArrayStartBounded(0).encode(&mut self.writer)?;
+        //enc::ArrayStartBounded(0).encode(&mut self.writer)?;
+        types::Null.encode(&mut self.writer)?;
         Ok(())
     }
 
